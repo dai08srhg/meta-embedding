@@ -1,0 +1,13 @@
+# 開発用
+version: '3'
+services:
+  app:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    image: meta-embedding
+    volumes:
+      - './:/workspace'
+    container_name: meta-embedding
+    tty: true
+    working_dir: '/workspace'
