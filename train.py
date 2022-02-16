@@ -1,6 +1,5 @@
 import pandas as pd
 from typing import List, Tuple
-import numpy as np
 from category_encoders import OrdinalEncoder
 import torch
 from torch import nn, optim
@@ -28,13 +27,14 @@ def get_embedding_size(df: pd.DataFrame, embedding_dim: int) -> List[Tuple[int, 
     return embedding_sizes
 
 
-def train_base_model(X_train, X_valid, y_train, y_valid):
+def train_base_model(X_train: pd.DataFrame, X_valid: pd.Series, y_train: pd.DataFrame, y_valid: pd.Series):
     """
     baseモデルを学習
     """
     train_dataset = MetaEmbeddingDataset(X_train, y_train)
+    valid_dataset = MetaEmbeddingDataset(X_valid, y_valid)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=3, shuffle=True)
-    valid_loader = torch.utils.data.DataLoader(train_dataset, batch_size=3, shuffle=True)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=3, shuffle=True)
 
     # Build model
     embedding_sizes = get_embedding_size(X_train, 5)
@@ -82,7 +82,8 @@ def train_base_model(X_train, X_valid, y_train, y_valid):
             torch.save(base_model.state_dict(), '/workspace/storage/model/base_model_params.pth')
 
 
-def train_meta_embedding(X_train, X_valid, y_train, y_valid, target_cols, meta_cols):
+def train_meta_embedding(X_train: pd.DataFrame, X_valid: pd.Series, y_train: pd.DataFrame, y_valid: pd.Series,
+                         target_cols: List[str], meta_cols: List[str]):
     """
     Meta-Embeddingの学習
     """
@@ -92,8 +93,9 @@ def train_meta_embedding(X_train, X_valid, y_train, y_valid, target_cols, meta_c
 
     # データセット作成
     train_dataset = MetaEmbeddingDataset(X_train, y_train)
+    valid_dataset = MetaEmbeddingDataset(X_valid, y_valid)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=3, shuffle=True)
-    valid_loader = torch.utils.data.DataLoader(train_dataset, batch_size=3, shuffle=True)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=3, shuffle=True)
 
     # モデル構築
     embedding_sizes = get_embedding_size(X_train, 5)  # 全ての特徴量の埋め込み次元 = 5
@@ -101,7 +103,6 @@ def train_meta_embedding(X_train, X_valid, y_train, y_valid, target_cols, meta_c
     # ベースモデルのベストパラメータロード
     base_model.load_state_dict(torch.load('/workspace/storage/model/base_model_params.pth'))
     meta_model = MetaNetwork(base_model, target_idxs, meta_idxs)
-    print(meta_model)
 
     # 設定
     epochs = 2
@@ -162,7 +163,9 @@ def predict(X, X_train, target_cols, meta_cols):
     # 推論モデル構築
     ctr_predictor = CtrPredictor(meta_model, target_idxs, meta_idxs)
 
-    p = ctr_predictor(X)
+    ctr_predictor.eval()
+    with torch.no_grad():
+        p = ctr_predictor(X)
     print(p)
 
 
