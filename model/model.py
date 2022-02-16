@@ -4,6 +4,9 @@ from typing import List, Tuple
 
 
 class BaseModel(nn.Module):
+    """
+    ベースとなる予測モデル
+    """
 
     def __init__(self, embedding_sizes: List[Tuple[int, int]]):
         super(BaseModel, self).__init__()
@@ -15,14 +18,13 @@ class BaseModel(nn.Module):
         for _, embedding_dim in embedding_sizes:
             input_dim += embedding_dim
 
-        self.linear = nn.Linear(in_features=input_dim, out_features=1)
-        self.sigmoid = nn.Sigmoid()
+        self.predictor = nn.Sequential(nn.Linear(in_features=input_dim, out_features=64), nn.ReLU(),
+                                       nn.Linear(in_features=64, out_features=1), nn.Sigmoid())
 
     def forward(self, inputs):
         embeddings = [embedding_layer(inputs[:, i]) for i, embedding_layer in enumerate(self.embedding_layers)]
         h = torch.cat(embeddings, dim=1)  # concat
-        h = self.linear(h)
-        p = self.sigmoid(h)
+        p = self.predictor(h)
         return p
 
 
@@ -31,111 +33,114 @@ class MetaNetwork(nn.Module):
     NN for train meta-embedding
     """
 
-    def __init__(self, base_model: BaseModel, ad_id_idx: int, ad_feature_idxs: List[int], output_dim: int):
+    def __init__(self, base_model: BaseModel, target_idxs: List[int], meta_idxs: List[int]):
         """
         Meta-Embedding network
 
         Args:
-            base_model (BaseModel): trained base_model
-            ad_feature_idxs: indexs of ad
+            base_model (BaseModel): 学習済みのベースモデル
+            target_idxs (List[int]): Meta-Embedding対象の特徴量のインデックス
+            meta_idxs (List[int]): Meta-Embeddingの入力に使う特徴量のインデックス
         """
         super(MetaNetwork, self).__init__()
 
-        # ad id以外の埋め込み層
-        self.embedding_layers = nn.ModuleList()
-        for idx in range(len(base_model.embedding_layers)):
-            if idx != ad_id_idx:
-                self.embedding_layers.append(base_model.embedding_layers[idx])
+        # 全特徴量の学習済み埋め込み層
+        self.embedding_layers = base_model.embedding_layers
 
-        # 広告特徴量の埋め込み層
-        self.ad_feature_embedding_layers = nn.ModuleList()
-        for i in ad_feature_idxs:
-            self.ad_feature_embedding_layers.append(base_model.embedding_layers[i])
-
-        # trainable network
-        input_dim = len(self.ad_feature_embedding_layers)
-        self.linear = nn.Linear(in_features=input_dim, out_features=output_dim)
+        # trainable network (Meta-Embedding対象特徴量ごとに定義)
+        input_dim = len(meta_idxs)  # Meta-Embeddingに入力する特徴量の数
+        self.meta_linear_layers = nn.ModuleList()
+        for i in target_idxs:
+            output_dim = base_model.embedding_layers[i].embedding_dim
+            self.meta_linear_layers.append(nn.Linear(in_features=input_dim, out_features=output_dim))
 
         # predictor
-        self.predictor = base_model.linear
-        self.sigmoid = nn.Sigmoid()
+        self.predictor = base_model.predictor
 
         # fix params
         for param in self.embedding_layers.parameters():
             param.requires_grad = False
-        for param in self.ad_feature_embedding_layers.parameters():
-            param.requires_grad = False
         for param in self.predictor.parameters():
             param.requires_grad = False
 
-    def forward(self, ad_feature_inputs, feature_inputs):
-        # embedding
-        embeddings = [embedding_layer(feature_inputs[:, i]) for i, embedding_layer in enumerate(self.embedding_layers)]
+        all_idx = list(range(len(base_model.embedding_layers)))
+        self.target_idxs = target_idxs
+        self.meta_idxs = meta_idxs
+        self.other_idxs = [i for i in all_idx if i not in target_idxs]  # 通常のEmbeddingを行う特徴量のインデック
 
-        # meta-embedding
-        ad_feature_embeddings = [
-            embedding_layer(ad_feature_inputs[:, i])
-            for i, embedding_layer in enumerate(self.ad_feature_embedding_layers)
-        ]
-        h_ad = [torch.mean(embedding, dim=1).unsqueeze(1) for embedding in ad_feature_embeddings]  # average pooling
-        h_ad = torch.cat(h_ad, dim=1)
-        meta_embedding = self.linear(h_ad)
+    def forward(self, inputs):
+        # Meta-Embedding対象以外の特徴量を埋め込み
+        embeddings = [self.embedding_layers[i](inputs[:, i]) for i in self.other_idxs]
 
-        # predict
-        embeddings.insert(0, meta_embedding)
-        h = torch.cat(embeddings, dim=1)
+        # Meta-embedding
+        meta_feature_embeddings = [self.embedding_layers[i](inputs[:, i]) for i in self.meta_idxs]
+        meta_vec = [torch.mean(embedding, dim=1).unsqueeze(1) for embedding in meta_feature_embeddings]  # pooling
+        meta_vec = torch.cat(meta_vec, dim=1)
+        meta_embeddings = [linear_layer(meta_vec) for linear_layer in self.meta_linear_layers]
+        meta_embeddings = torch.cat(meta_embeddings, dim=1)
+
+        embeddings.insert(0, meta_embeddings)
+        h = torch.cat(embeddings, dim=1)  # concat
+
         p = self.predictor(h)
-        p = self.sigmoid(p)
-
         return p
 
 
 class CtrPredictor(nn.Module):
+    """
+    推論用のモデル
+    """
 
-    def __init__(self, base_model: BaseModel, meta_network: MetaNetwork):
+    def __init__(self, meta_model: MetaNetwork, target_idxs, meta_idxs):
+        """
+        推論用モデル
+        Args:
+            base_model (BaseModel): 学習済みのベースモデル
+            meta_model (MetaNetwork): 学習済みのMetaNetwork
+            target_idxs (List[int]): Meta-Embedding対象の特徴量のインデックス
+            meta_idxs (List[int]): Meta-Embeddingの入力に使う特徴量のインデックス
+        """
         super(CtrPredictor, self).__init__()
 
-        self.embedding_layers = base_model.embedding_layers
-
+        # 前特徴量のEmbedidng層
+        self.embedding_layers = meta_model.embedding_layers
         # Meta-Embedding network
-        self.ad_feature_embedding_layers = meta_network.ad_feature_embedding_layers
-        self.meta_embedding_generator = meta_network.linear
+        self.meta_linear_layers = meta_model.meta_linear_layers
+        # 識別層
+        self.predictor = meta_model.predictor
 
-        # predict layer
-        self.predictor = base_model.linear
-        self.sigmoid = nn.Sigmoid()
+        all_idx = list(range(len(meta_model.embedding_layers)))
+        self.target_idxs = target_idxs
+        self.meta_idxs = meta_idxs
+        self.other_idxs = [i for i in all_idx if i not in target_idxs]  # 通常のEmbeddingを行う特徴量のインデックス
 
-    def forward(self, inputs, ad_inputs):
-        ad_id_inputs = inputs[:, 0]
+    def forward(self, inputs):
+        # Meta-Embedding対象以外の特徴量の埋め込み
+        embeddings = [self.embedding_layers[i](inputs[:, i]) for i in self.other_idxs]
 
-        # ad_id以外の特徴量をembedding
-        embedding_nums = len(self.embedding_layers)
-        embeddings = [self.embedding_layers[i](inputs[:, i]) for i in range(1, embedding_nums)]
+        minibatch = inputs.size(0)
+        # サンプルごとに処理
+        target_embeddings = []
+        for i in range(minibatch):
+            # 特徴量ごとに処理
+            embeddings_j = []
+            for j in self.target_idxs:
+                if inputs[i][j] != 0:
+                    # 通常のEmbedding (既知のID)
+                    embedding = self.embedding_layers[j](inputs[i][j])
+                else:
+                    # Meta-Embedding (未知のID)
+                    meta_feature_embeddings = [self.embedding_layers[k](inputs[i][k]) for k in self.meta_idxs]
+                    meta_vec = [torch.mean(embedding) for embedding in meta_feature_embeddings]
+                    meta_vec = torch.stack(meta_vec)
+                    embedding = self.meta_linear_layers[j](meta_vec)
+                embeddings_j.append(embedding)
+            embeddings_j = torch.cat(embeddings_j)
+            target_embeddings.append(embeddings_j)
+        target_embeddings = torch.stack(target_embeddings)
 
-        # ad_idのembedding
-        ad_id_embeddings = []
-        for i in range(inputs.size(0)):
-            input = ad_id_inputs[i]
-            if input != 0:
-                # 学習データ中に含まれる既知のad_idの場合
-                embedding = self.embedding_layers[0](input)
-                ad_id_embeddings.append(embedding)
-            else:
-                # 学習データに含まれない未知のad_idの場合
-                ad_feature_input = ad_inputs[i]
-                ad_feature_embeddings = [
-                    embedding_layer(ad_feature_input[i])
-                    for i, embedding_layer in enumerate(self.ad_feature_embedding_layers)
-                ]
-                h_ad = [torch.mean(embedding) for embedding in ad_feature_embeddings]
-                h_ad = torch.stack(h_ad)
-                meta_embedding = self.meta_embedding_generator(h_ad)
-                ad_id_embeddings.append(meta_embedding)
-        ad_id_embeddings = torch.stack(ad_id_embeddings)
-        embeddings.insert(0, ad_id_embeddings)
-
+        embeddings.insert(0, target_embeddings)
         h = torch.cat(embeddings, dim=1)  # concat
-        p = self.predictor(h)
-        p = self.sigmoid(p)
 
+        p = self.predictor(h)
         return p

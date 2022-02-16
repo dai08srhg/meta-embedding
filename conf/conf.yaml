@@ -1,4 +1,5 @@
 features:
-  ad_id: 'ad_id'
-  ad_features: ['ad_feature_1', 'ad_feature_2', 'ad_feature_3']
-  other_features: ['other_feature_1', 'other_feature_2', 'other_feature_3']
+  target_features: ['target_id_1', 'target_id_2']
+  meta_features: ['meta_feature_1', 'meta_feature_2', 'meta_feature_3']
+  other_features: ['feature_1', 'feature_2', 'feature_3']
+  supervised: 'click'
