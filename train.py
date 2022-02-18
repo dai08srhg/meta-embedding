@@ -162,10 +162,18 @@ def predict(X, X_train, target_cols, meta_cols):
     meta_model.load_state_dict(torch.load('/workspace/storage/model/meta_model_params.pth'))
     # 推論モデル構築
     ctr_predictor = CtrPredictor(meta_model, target_idxs, meta_idxs)
+    print(X)
 
+    print('Meta-Embeddingで推論')
     ctr_predictor.eval()
     with torch.no_grad():
         p = ctr_predictor(X)
+    print(p)
+
+    print('ベースモデルで推論')
+    base_model.eval()
+    with torch.no_grad():
+        p = base_model(X)
     print(p)
 
 
